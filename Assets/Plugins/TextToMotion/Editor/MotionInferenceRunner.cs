@@ -25,11 +25,10 @@ namespace TextToMotion.Editor
     /// </summary>
     public sealed class MotionInferenceRunner : IDisposable
     {
-        // ── Имена тензоров — открой модель в Netron и сверь ─────────────────
-        private const string INPUT_TOKENS   = "text_tokens";   // int32  [1, seq]
-        private const string INPUT_NOISE    = "noisy_motion";  // float32 [1, F, 263]
-        private const string INPUT_TIMESTEP = "timestep";      // int32  [1]
-        private const string OUTPUT_MOTION  = "motion_pred";   // float32 [1, F, 263]
+        private const string INPUT_TOKENS   = "text_tokens";
+        private const string INPUT_NOISE    = "noisy_motion";
+        private const string INPUT_TIMESTEP = "timestep";
+        private const string OUTPUT_MOTION  = "motion_pred";
 
         private const int   DEFAULT_FRAMES  = 196;
         private const float DEFAULT_FPS     = 20f;
@@ -38,22 +37,24 @@ namespace TextToMotion.Editor
         public int   MaxFrames { get; private set; } = DEFAULT_FRAMES;
         public float Fps       { get; private set; } = DEFAULT_FPS;
 
-        // ── 2.6.1: Model + Worker (нет IWorker / WorkerFactory) ─────────────
         private Model  _model;
-        private Worker _worker;   // конкретный класс, не интерфейс
-
-        private string  _meanPath, _stdPath;
+        private Worker _worker;
+        private string _meanPath, _stdPath;
         private float[] _mean, _std;
         private bool    _normReady;
 
-        public MotionInferenceRunner(string onnxPath)
+        /// <param name="modelAsset">ModelAsset из AssetDatabase (Assets/.../*.onnx)</param>
+        /// <param name="sidecarJsonPath">Абсолютный путь к .json sidecar, опционально</param>
+        public MotionInferenceRunner(ModelAsset modelAsset, string sidecarJsonPath = null)
         {
-            _model  = ModelLoader.Load(onnxPath);
-            // Worker(Model, BackendType) — актуальный конструктор в 2.x
+            if (modelAsset == null)
+                throw new ArgumentNullException(nameof(modelAsset));
+
+            _model  = ModelLoader.Load(modelAsset);   // ← единственный валидный путь для .onnx
             _worker = new Worker(_model, BackendType.GPUCompute);
 
-            string json = Path.ChangeExtension(onnxPath, ".json");
-            if (File.Exists(json)) LoadSidecar(json);
+            if (!string.IsNullOrEmpty(sidecarJsonPath) && File.Exists(sidecarJsonPath))
+                LoadSidecar(sidecarJsonPath);
         }
 
         // ────────────────────────────────────────────────────────────────────

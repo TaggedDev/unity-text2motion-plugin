@@ -1,0 +1,40 @@
+<ui:UXML xmlns:ui="UnityEngine.UIElements"
+         xmlns:uie="UnityEditor.UIElements"
+         xmlns:editor="UnityEditor.UIElements"
+         engine="UnityEngine.UIElements">
+
+    <ui:VisualElement name="root" class="ttm-root" view-data-key="ttm-root">
+        <ui:Label name="title-label" text="Text to Motion" class="ttm-title" />
+
+        <ui:VisualElement class="ttm-section">
+            <ui:Label text="Model Source" class="ttm-section-title" />
+            <ui:TextField name="models-folder-field"
+                          label="Models Folder"
+                          is-read-only="true" />
+            <ui:Button name="browse-models-folder-button" text="Browse Models Folder" />
+            <ui:DropdownField name="model-dropdown"
+                              label="Model" />
+        </ui:VisualElement>
+
+        <ui:VisualElement class="ttm-section">
+            <ui:Label text="Prompt" class="ttm-section-title" />
+            <ui:TextField name="prompt-field"
+                          label="Prompt"
+                          multiline="true"
+                          view-data-key="ttm-prompt-field" />
+        </ui:VisualElement>
+
+        <ui:VisualElement class="ttm-section">
+            <ui:Label text="Output" class="ttm-section-title" />
+            <ui:TextField name="output-folder-field"
+                          label="Output Folder"
+                          is-read-only="true" />
+            <ui:Button name="browse-output-folder-button" text="Select Output Folder" />
+        </ui:VisualElement>
+
+        <ui:VisualElement class="ttm-footer">
+            <ui:Button name="generate-button" text="GENERATE" class="ttm-generate-button" />
+            <ui:Label name="status-label" text="UI ready." class="ttm-status-label" />
+        </ui:VisualElement>
+    </ui:VisualElement>
+</ui:UXML>

@@ -1,4 +1,5 @@
-﻿using System.IO;
+﻿// Editor/HumanML3DToClip.cs
+using System.IO;
 using UnityEditor;
 using UnityEngine;
 
@@ -6,25 +7,24 @@ namespace TextToMotion
 {
     /// <summary>
     /// Converts a denormalised HumanML3D feature array [frames × 263]
-    /// into a Unity AnimationClip and saves it as a .anim asset.
+    /// into a Unity AnimationClip saved as a .anim asset.
     ///
-    /// Layout assumed (MDM convention):
+    /// HumanML3D layout (MDM convention):
     ///   [0]       root angular velocity Y  (rad/frame)
     ///   [1–2]     root velocity XZ         (m/frame)
     ///   [3]       root height Y            (m)
     ///   [4–135]   22 joints × 6D rotation  (Zhou et al. 2019)
-    ///   [136–201] 22 joints × 3D position  (world space)
-    ///   [202–262] velocities / contacts    (ignored)
-    ///
-    /// Bone names must match transform names in your rig.
+    ///   [136–201] 22 joints × 3D position  (world space, used for preview only)
+    ///   [202–262] foot contacts / velocities (ignored)
     /// </summary>
     public static class HumanML3DToClip
     {
-        private const int FEAT_DIM  = 263;
-        private const int NUM_JOINTS = 22;
-        private const int ROT_OFF   = 4;           // start of 6D rotations
-        private const int POS_OFF   = 4 + 22 * 6; // = 136, start of positions
+        public const int FEAT_DIM   = 263;
+        public const int NUM_JOINTS = 22;
+        public const int ROT_OFF    = 4;           // start of 6D rotations
+        public const int POS_OFF    = 136;         // 4 + 22*6
 
+        // Joint names must match Transform names in your preview rig
         public static readonly string[] JointNames =
         {
             "Pelvis",
@@ -38,78 +38,146 @@ namespace TextToMotion
             "L_Wrist",    "R_Wrist"
         };
 
-        public static AnimationClip Build(float[] raw, int frames, float fps, string savePath)
+        public static AnimationClip Build(
+            float[] raw, int frames, float fps, string assetPath)
         {
-            var clip = new AnimationClip { frameRate = fps, name = "GeneratedMotion" };
-            AnimationUtility.SetAnimationClipSettings(clip,
-                new AnimationClipSettings { loopTime = false });
+            // ── Ensure output folder exists in AssetDatabase ──────────────
+            string dir = Path.GetDirectoryName(assetPath)?.Replace('\\', '/') ?? "Assets";
+            EnsureFolder(dir);
+
+            var clip = new AnimationClip
+            {
+                frameRate = fps,
+                name      = Path.GetFileNameWithoutExtension(assetPath),
+                legacy    = false   // Generic / Humanoid compatible
+            };
+
+            var settings = AnimationUtility.GetAnimationClipSettings(clip);
+            settings.loopTime        = false;
+            settings.loopBlend       = false;
+            settings.keepOriginalPositionXZ = false;
+            settings.keepOriginalPositionY  = false;
+            AnimationUtility.SetAnimationClipSettings(clip, settings);
 
             float dt = 1f / fps;
 
-            // ── Root trajectory (integrate velocity) ──────────────────────
-            var cpx = new AnimationCurve(); var cpy = new AnimationCurve(); var cpz = new AnimationCurve();
-            var crx = new AnimationCurve(); var cry = new AnimationCurve();
-            var crz = new AnimationCurve(); var crw = new AnimationCurve();
+            // ── Root trajectory ──────────────────────────────────────────
+            var cpx = new AnimationCurve();
+            var cpy = new AnimationCurve();
+            var cpz = new AnimationCurve();
+            var crx = new AnimationCurve();
+            var cry = new AnimationCurve();
+            var crz = new AnimationCurve();
+            var crw = new AnimationCurve();
 
-            Vector3 pos = Vector3.zero;
+            Vector3 pos  = Vector3.zero;
             float   rotY = 0f;
 
             for (int f = 0; f < frames; f++)
             {
                 int   off = f * FEAT_DIM;
                 float t   = f * dt;
-                rotY += raw[off];
-                var rot = Quaternion.Euler(0f, rotY * Mathf.Rad2Deg, 0f);
-                pos   += rot * new Vector3(raw[off + 1], 0f, raw[off + 2]);
-                pos.y  = raw[off + 3];
 
-                cpx.AddKey(t, pos.x); cpy.AddKey(t, pos.y); cpz.AddKey(t, pos.z);
-                crx.AddKey(t, rot.x); cry.AddKey(t, rot.y); crz.AddKey(t, rot.z); crw.AddKey(t, rot.w);
+                rotY += raw[off];
+                var   rootRot = Quaternion.Euler(0f, rotY * Mathf.Rad2Deg, 0f);
+                pos  += rootRot * new Vector3(raw[off + 1], 0f, raw[off + 2]);
+                pos.y = raw[off + 3];
+
+                AddKey(cpx, t, pos.x);
+                AddKey(cpy, t, pos.y);
+                AddKey(cpz, t, pos.z);
+                AddKey(crx, t, rootRot.x);
+                AddKey(cry, t, rootRot.y);
+                AddKey(crz, t, rootRot.z);
+                AddKey(crw, t, rootRot.w);
             }
 
-            clip.SetCurve(JointNames[0], typeof(Transform), "localPosition.x", cpx);
-            clip.SetCurve(JointNames[0], typeof(Transform), "localPosition.y", cpy);
-            clip.SetCurve(JointNames[0], typeof(Transform), "localPosition.z", cpz);
-            clip.SetCurve(JointNames[0], typeof(Transform), "localRotation.x", crx);
-            clip.SetCurve(JointNames[0], typeof(Transform), "localRotation.y", cry);
-            clip.SetCurve(JointNames[0], typeof(Transform), "localRotation.z", crz);
-            clip.SetCurve(JointNames[0], typeof(Transform), "localRotation.w", crw);
+            SetCurveSmooth(clip, JointNames[0], "localPosition.x", cpx);
+            SetCurveSmooth(clip, JointNames[0], "localPosition.y", cpy);
+            SetCurveSmooth(clip, JointNames[0], "localPosition.z", cpz);
+            SetCurveSmooth(clip, JointNames[0], "localRotation.x", crx);
+            SetCurveSmooth(clip, JointNames[0], "localRotation.y", cry);
+            SetCurveSmooth(clip, JointNames[0], "localRotation.z", crz);
+            SetCurveSmooth(clip, JointNames[0], "localRotation.w", crw);
 
-            // ── Per-joint rotations (6D → quaternion) ─────────────────────
+            // ── Per-joint rotations (6D → Quaternion) ────────────────────
             for (int j = 1; j < NUM_JOINTS; j++)
             {
-                var rx = new AnimationCurve(); var ry = new AnimationCurve();
-                var rz = new AnimationCurve(); var rw = new AnimationCurve();
+                var rx = new AnimationCurve();
+                var ry = new AnimationCurve();
+                var rz = new AnimationCurve();
+                var rw = new AnimationCurve();
 
                 for (int f = 0; f < frames; f++)
                 {
                     float t   = f * dt;
                     int   off = f * FEAT_DIM + ROT_OFF + j * 6;
+
+                    if (off + 5 >= raw.Length) break;
+
                     var a = new Vector3(raw[off],     raw[off + 1], raw[off + 2]);
                     var b = new Vector3(raw[off + 3], raw[off + 4], raw[off + 5]);
                     var q = Rot6D(a, b);
-                    rx.AddKey(t, q.x); ry.AddKey(t, q.y); rz.AddKey(t, q.z); rw.AddKey(t, q.w);
+
+                    // Flip sign if dot with previous frame < 0 (quaternion continuity)
+                    if (f > 0)
+                    {
+                        int  prevOff = (f - 1) * FEAT_DIM + ROT_OFF + j * 6;
+                        var  pa = new Vector3(raw[prevOff],     raw[prevOff+1], raw[prevOff+2]);
+                        var  pb = new Vector3(raw[prevOff + 3], raw[prevOff+4], raw[prevOff+5]);
+                        var  pq = Rot6D(pa, pb);
+                        if (q.x*pq.x + q.y*pq.y + q.z*pq.z + q.w*pq.w < 0f)
+                            q = new Quaternion(-q.x, -q.y, -q.z, -q.w);
+                    }
+
+                    AddKey(rx, t, q.x);
+                    AddKey(ry, t, q.y);
+                    AddKey(rz, t, q.z);
+                    AddKey(rw, t, q.w);
                 }
 
-                clip.SetCurve(JointNames[j], typeof(Transform), "localRotation.x", rx);
-                clip.SetCurve(JointNames[j], typeof(Transform), "localRotation.y", ry);
-                clip.SetCurve(JointNames[j], typeof(Transform), "localRotation.z", rz);
-                clip.SetCurve(JointNames[j], typeof(Transform), "localRotation.w", rw);
+                SetCurveSmooth(clip, JointNames[j], "localRotation.x", rx);
+                SetCurveSmooth(clip, JointNames[j], "localRotation.y", ry);
+                SetCurveSmooth(clip, JointNames[j], "localRotation.z", rz);
+                SetCurveSmooth(clip, JointNames[j], "localRotation.w", rw);
             }
 
-            // ── Save ──────────────────────────────────────────────────────
-            string dir = Path.GetDirectoryName(savePath);
-            if (!string.IsNullOrEmpty(dir) && !Directory.Exists(dir))
-                Directory.CreateDirectory(dir);
-
-            AssetDatabase.CreateAsset(clip, savePath);
+            // ── Save asset ────────────────────────────────────────────────
+            AssetDatabase.CreateAsset(clip, assetPath);
             AssetDatabase.SaveAssets();
             AssetDatabase.Refresh();
+
+            Debug.Log($"[TTM] Saved AnimationClip: {assetPath}  frames={frames}  fps={fps}");
             return clip;
         }
 
+        // ── Helpers ───────────────────────────────────────────────────────
+
+        // Use EditorCurveBinding + AnimationUtility for correct metadata
+        private static void SetCurveSmooth(
+            AnimationClip clip, string boneName, string property, AnimationCurve curve)
+        {
+            // Smooth tangents for rotation curves (avoid gimbal artifacts)
+            for (int i = 0; i < curve.length; i++)
+                AnimationUtility.SetKeyLeftTangentMode(curve,  i, AnimationUtility.TangentMode.ClampedAuto);
+
+            var binding = new EditorCurveBinding
+            {
+                path         = boneName,
+                type         = typeof(Transform),
+                propertyName = property
+            };
+            AnimationUtility.SetEditorCurve(clip, binding, curve);
+        }
+
+        private static void AddKey(AnimationCurve c, float t, float v)
+        {
+            var kf = new Keyframe(t, v);
+            c.AddKey(kf);
+        }
+
         // Zhou et al. 2019 – 6D rotation → Quaternion
-        private static Quaternion Rot6D(Vector3 a, Vector3 b)
+        public static Quaternion Rot6D(Vector3 a, Vector3 b)
         {
             Vector3 x = a.normalized;
             Vector3 y = (b - Vector3.Dot(b, x) * x).normalized;
@@ -121,6 +189,7 @@ namespace TextToMotion
 
             float tr = m00 + m11 + m22;
             float qx, qy, qz, qw;
+
             if (tr > 0f)
             {
                 float s = 0.5f / Mathf.Sqrt(tr + 1f);
@@ -141,7 +210,20 @@ namespace TextToMotion
                 float s = 2f * Mathf.Sqrt(1f + m22 - m00 - m11);
                 qw=(m10-m01)/s; qx=(m02+m20)/s; qy=(m12+m21)/s; qz=0.25f*s;
             }
+
             return new Quaternion(qx, qy, qz, qw);
+        }
+
+        // Creates AssetDatabase-registered folder hierarchy
+        public static void EnsureFolder(string folderPath)
+        {
+            folderPath = folderPath.Replace('\\', '/').TrimEnd('/');
+            if (AssetDatabase.IsValidFolder(folderPath)) return;
+
+            string parent = Path.GetDirectoryName(folderPath)?.Replace('\\', '/') ?? "Assets";
+            string leaf   = Path.GetFileName(folderPath);
+            EnsureFolder(parent);   // recurse
+            AssetDatabase.CreateFolder(parent, leaf);
         }
     }
 }

@@ -1,131 +1,173 @@
 ﻿// Editor/MotionInferenceRunner.cs
-// Requires: com.unity.ai.inference 2.2.0+  (namespace Unity.InferenceEngine)
-// Tested against 2.6.1 — 2026-04-02
+// Requires: com.unity.ai.inference 2.6.1
 
 using System;
 using System.IO;
 using System.Threading;
 using System.Threading.Tasks;
-using Unity.InferenceEngine;          // ← было Unity.Sentis
+using Unity.InferenceEngine;
 using UnityEngine;
 
 namespace TextToMotion.Editor
 {
-    /// <summary>
-    /// Запускает одну ONNX text-to-motion модель через Unity Sentis / AI Inference Engine 2.6+.
-    ///
-    /// ПЕРЕД ИСПОЛЬЗОВАНИЕМ:
-    ///   1. Проверь имена тензоров своей модели в https://netron.app и поправь константы INPUT_*/OUTPUT_*.
-    ///   2. Замени TokenisePrompt() на настоящий токенайзер (CLIP/BPE).
-    ///      В 2.5+ доступен Unity.InferenceEngine.Tokenization — рассмотри его.
-    ///   3. Если модель использует DDIM/PLMS, скорректируй scheduler в RunAsync().
-    ///
-    /// Sidecar JSON (то же имя, расширение .json рядом с .onnx):
-    ///   { "max_frames": 196, "fps": 20.0, "mean_file": "Mean.npy", "std_file": "Std.npy" }
-    /// </summary>
     public sealed class MotionInferenceRunner : IDisposable
     {
-        private const string INPUT_TOKENS   = "text_tokens";
-        private const string INPUT_NOISE    = "noisy_motion";
-        private const string INPUT_TIMESTEP = "timestep";
-        private const string OUTPUT_MOTION  = "motion_pred";
+        // ── Denoiser tensor names (из Netron) ────────────────────────────────
+        private const string D_IN_XT       = "xt";
+        private const string D_IN_T        = "t";
+        private const string D_IN_TEXT_EMB = "text_emb";
+        private const string D_IN_MASK     = "mask";
+        private const string D_OUT_PRED    = "pred_x0";
 
-        private const int   DEFAULT_FRAMES  = 196;
-        private const float DEFAULT_FPS     = 20f;
-        private const int   MAX_TOKEN_LEN   = 32;
+        // ── CLIP tensor names (из Netron) ────────────────────────────────────
+        private const string C_IN_TOKENS = "input";
+        private const string C_OUT_EMBED = "output";
+
+        private const int   DEFAULT_FRAMES = 196;
+        private const float DEFAULT_FPS    = 20f;
 
         public int   MaxFrames { get; private set; } = DEFAULT_FRAMES;
         public float Fps       { get; private set; } = DEFAULT_FPS;
 
-        private Model  _model;
-        private Worker _worker;
-        private string _meanPath, _stdPath;
+        private Model  _denoiserModel;
+        private Worker _denoiserWorker;
+        private Model  _clipModel;
+        private Worker _clipWorker;
+
+        private ClipTokenizer _tokenizer;
+
+        private string  _meanPath, _stdPath;
         private float[] _mean, _std;
         private bool    _normReady;
 
-        /// <param name="modelAsset">ModelAsset из AssetDatabase (Assets/.../*.onnx)</param>
-        /// <param name="sidecarJsonPath">Абсолютный путь к .json sidecar, опционально</param>
-        public MotionInferenceRunner(ModelAsset modelAsset, string sidecarJsonPath = null)
-        {
-            if (modelAsset == null)
-                throw new ArgumentNullException(nameof(modelAsset));
+        // ── Constructor ──────────────────────────────────────────────────────
 
-            _model  = ModelLoader.Load(modelAsset);   // ← единственный валидный путь для .onnx
-            _worker = new Worker(_model, BackendType.GPUCompute);
+        public MotionInferenceRunner(
+            ModelAsset denoiserAsset,
+            ModelAsset clipAsset,
+            string     sidecarJsonPath   = null,
+            string     tokenizerJsonPath = null)
+        {
+            if (denoiserAsset == null) throw new ArgumentNullException(nameof(denoiserAsset));
+            if (clipAsset     == null) throw new ArgumentNullException(nameof(clipAsset));
+
+            _denoiserModel  = ModelLoader.Load(denoiserAsset);
+            _denoiserWorker = new Worker(_denoiserModel, BackendType.GPUCompute);
+
+            _clipModel  = ModelLoader.Load(clipAsset);
+            _clipWorker = new Worker(_clipModel, BackendType.GPUCompute);
+
+            if (!string.IsNullOrEmpty(tokenizerJsonPath) && File.Exists(tokenizerJsonPath))
+            {
+                try   { _tokenizer = ClipTokenizer.Load(tokenizerJsonPath); }
+                catch (Exception e) { Debug.LogWarning($"[TTM] Tokenizer load failed: {e.Message}"); }
+            }
+
+            if (_tokenizer == null)
+                Debug.LogWarning("[TTM] tokenizer.json not found — using char-level fallback.");
 
             if (!string.IsNullOrEmpty(sidecarJsonPath) && File.Exists(sidecarJsonPath))
                 LoadSidecar(sidecarJsonPath);
         }
 
-        // ────────────────────────────────────────────────────────────────────
-        //  Основной entry point
-        // ────────────────────────────────────────────────────────────────────
+        // ── Main entry point ─────────────────────────────────────────────────
+
         public async Task<float[]> RunAsync(
-            string           prompt,
-            int              steps,
-            int              seed,
-            IProgress<float> progress,
+            string            prompt,
+            int               steps,
+            int               seed,
+            IProgress<float>  progress,
             CancellationToken ct)
         {
-            int[]   tokens = TokenisePrompt(prompt);
-            float[] noisy  = GaussianNoise(MaxFrames * 263, seed);
+            progress?.Report(0.02f);
+            float[] textEmb = await Task.Run(() => EncodeText(prompt), ct);
+
+            float[] xt   = GaussianNoise(MaxFrames * 263, seed);
+            float[] mask = BuildMask();
 
             for (int i = 0; i < steps; i++)
             {
                 ct.ThrowIfCancellationRequested();
-                progress?.Report(i / (float)steps * 0.85f);
+                progress?.Report(0.05f + i / (float)steps * 0.80f);
 
-                int t = (int)(999f * (steps - i) / steps);   // linear scheduler
-                noisy = await Task.Run(() => StepModel(tokens, noisy, t), ct);
+                int t = (int)(999f * (steps - 1 - i) / Math.Max(steps - 1, 1));
+                xt = await Task.Run(() => StepDenoiser(xt, t, textEmb, mask), ct);
             }
 
-            progress?.Report(0.9f);
-            float[] result = Denormalise(noisy);
-            progress?.Report(1f);
+            progress?.Report(0.90f);
+            float[] result = Denormalise(xt);
+            progress?.Report(1.00f);
             return result;
         }
 
-        // ────────────────────────────────────────────────────────────────────
-        //  Один шаг диффузии
-        //  В 2.6.1:
-        //    • TensorInt   → Tensor<int>
-        //    • TensorFloat → Tensor<float>
-        //    • new TensorFloat(shape, data[])  → new Tensor<float>(shape, data[])
-        //    • worker.PeekOutput(name)         → worker.PeekOutput<float>(name)  (generic)
-        //    • output.MakeReadable()           → DownloadToArray() / ReadbackAndClone()
-        // ────────────────────────────────────────────────────────────────────
-        private float[] StepModel(int[] tokens, float[] noisy, int timestep)
+        // ── CLIP encode ──────────────────────────────────────────────────────
+
+        private float[] EncodeText(string prompt)
         {
-            // Создаём тензоры через generic Tensor<T>
-            using var tTok   = new Tensor<int>  (new TensorShape(1, tokens.Length), tokens);
-            using var tNoise = new Tensor<float>(new TensorShape(1, MaxFrames, 263), noisy);
-            using var tStep  = new Tensor<int>  (new TensorShape(1), new[] { timestep });
+            int[] tokens = _tokenizer != null
+                ? _tokenizer.Encode(prompt)
+                : FallbackTokenise(prompt);
 
-            _worker.SetInput(INPUT_TOKENS,   tTok);
-            _worker.SetInput(INPUT_NOISE,    tNoise);
-            _worker.SetInput(INPUT_TIMESTEP, tStep);
-            _worker.Schedule();
+            using var tTokens = new Tensor<int>(new TensorShape(1, 77), tokens);
+            _clipWorker.SetInput(C_IN_TOKENS, tTokens);
+            _clipWorker.Schedule();
 
-            // PeekOutput возвращает Tensor (non-generic base); каст к Tensor<float>
-            var raw = _worker.PeekOutput(OUTPUT_MOTION) as Tensor<float>;
-            if (raw == null) return noisy;
+            var output = _clipWorker.PeekOutput(C_OUT_EMBED) as Tensor<float>;
+            if (output == null)
+            {
+                Debug.LogError("[TTM] CLIP output is null. Check C_OUT_EMBED name in Netron.");
+                return new float[512];
+            }
 
-            // В 2.x для чтения данных с GPU нужен явный readback:
-            // DownloadToArray() блокирует до завершения GPU-работы и возвращает float[]
-            float[] data = raw.DownloadToArray();
-            return data;
+            return output.DownloadToArray();
         }
 
-        // ── Токенайзер-заглушка — замени на настоящий ───────────────────────
-        private static int[] TokenisePrompt(string prompt)
+        // ── Denoiser step ────────────────────────────────────────────────────
+
+        private float[] StepDenoiser(float[] xt, int t, float[] textEmb, float[] mask)
         {
-            var ids = new int[MAX_TOKEN_LEN];
-            int n   = Math.Min(prompt.Length, MAX_TOKEN_LEN);
-            for (int i = 0; i < n; i++) ids[i] = prompt[i];
+            using var tXt  = new Tensor<float>(new TensorShape(1, MaxFrames, 263), xt);
+            using var tT   = new Tensor<int>  (new TensorShape(1), new[] { t });
+            using var tEmb = new Tensor<float>(new TensorShape(1, 512), textEmb);
+            using var tMsk = new Tensor<float>(new TensorShape(1, 263), mask);
+
+            _denoiserWorker.SetInput(D_IN_XT,       tXt);
+            _denoiserWorker.SetInput(D_IN_T,        tT);
+            _denoiserWorker.SetInput(D_IN_TEXT_EMB, tEmb);
+            _denoiserWorker.SetInput(D_IN_MASK,     tMsk);
+            _denoiserWorker.Schedule();
+
+            var output = _denoiserWorker.PeekOutput(D_OUT_PRED) as Tensor<float>;
+            if (output == null) return xt;
+
+            return output.DownloadToArray();
+        }
+
+        // ── Tokeniser fallback ───────────────────────────────────────────────
+
+        private static int[] FallbackTokenise(string prompt)
+        {
+            const int SOT = 49406, EOT = 49407;
+            var ids = new int[77];
+            ids[0] = SOT;
+            int n = Math.Min(prompt.Length, 75);
+            for (int i = 0; i < n; i++)
+                ids[i + 1] = (int)Math.Min((int)prompt[i], 49405);  // ← фикс Clamp ambiguity
+            ids[n + 1] = EOT;
             return ids;
         }
 
-        // ── Денормализация ───────────────────────────────────────────────────
+        // ── Mask ─────────────────────────────────────────────────────────────
+
+        private static float[] BuildMask()
+        {
+            var m = new float[263];
+            for (int i = 0; i < m.Length; i++) m[i] = 1f;
+            return m;
+        }
+
+        // ── Denormalise ──────────────────────────────────────────────────────
+
         private float[] Denormalise(float[] raw)
         {
             if (!_normReady) LoadNorm();
@@ -149,20 +191,17 @@ namespace TextToMotion.Editor
             if (_stdPath  != null && File.Exists(_stdPath))  _std  = LoadNpy(_stdPath);
         }
 
-        // ── Минимальный парсер .npy (float32, C-order, без fortran-order) ───
         private static float[] LoadNpy(string path)
         {
             try
             {
                 byte[] b = File.ReadAllBytes(path);
-                // .npy magic: \x93NUMPY (6 bytes) + major/minor (2) + header_len (2, little-endian)
                 if (b.Length < 10 || b[0] != 0x93)
                     throw new InvalidDataException("Not a valid .npy file");
-
-                int hLen = b[8] | (b[9] << 8);
-                int off  = 10 + hLen;
+                int hLen  = b[8] | (b[9] << 8);
+                int off   = 10 + hLen;
                 int count = (b.Length - off) / 4;
-                var arr  = new float[count];
+                var arr   = new float[count];
                 Buffer.BlockCopy(b, off, arr, 0, count * 4);
                 return arr;
             }
@@ -174,6 +213,7 @@ namespace TextToMotion.Editor
         }
 
         // ── Sidecar JSON ─────────────────────────────────────────────────────
+
         [Serializable]
         private class Sidecar
         {
@@ -187,9 +227,9 @@ namespace TextToMotion.Editor
         {
             try
             {
-                var d   = JsonUtility.FromJson<Sidecar>(File.ReadAllText(jsonPath));
-                MaxFrames = d.max_frames;
-                Fps       = d.fps;
+                var    d   = JsonUtility.FromJson<Sidecar>(File.ReadAllText(jsonPath));
+                MaxFrames  = d.max_frames;
+                Fps        = d.fps;
                 string dir = Path.GetDirectoryName(jsonPath);
                 if (!string.IsNullOrEmpty(d.mean_file)) _meanPath = Path.Combine(dir, d.mean_file);
                 if (!string.IsNullOrEmpty(d.std_file))  _stdPath  = Path.Combine(dir, d.std_file);
@@ -197,7 +237,8 @@ namespace TextToMotion.Editor
             catch (Exception e) { Debug.LogWarning($"[TTM] Sidecar error: {e.Message}"); }
         }
 
-        // ── Gaussian noise (Box-Muller) ──────────────────────────────────────
+        // ── Gaussian noise ────────────────────────────────────────────────────
+
         private static float[] GaussianNoise(int n, int seed)
         {
             var rng = new System.Random(seed);
@@ -211,13 +252,14 @@ namespace TextToMotion.Editor
             return arr;
         }
 
-        // ── IDisposable ──────────────────────────────────────────────────────
+        // ── Dispose ──────────────────────────────────────────────────────────
+
         public void Dispose()
         {
-            _worker?.Dispose();
-            _worker = null;
-            // Model не имеет Dispose() в публичном API — просто обнуляем
-            _model = null;
+            _denoiserWorker?.Dispose();
+            _clipWorker?.Dispose();
+            _denoiserModel = null;
+            _clipModel     = null;
         }
     }
 }

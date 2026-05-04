@@ -1,0 +1,81 @@
+{
+  "runtimeTarget": {
+    "name": ".NETStandard,Version=v2.0/",
+    "signature": ""
+  },
+  "compilationOptions": {},
+  "targets": {
+    ".NETStandard,Version=v2.0": {},
+    ".NETStandard,Version=v2.0/": {
+      "Tokenizers.DotNet/1.4.2": {
+        "dependencies": {
+          "NETStandard.Library": "2.0.3",
+          "RelaxVersioner": "3.22.0",
+          "System.Runtime.CompilerServices.Unsafe": "6.1.2",
+          "csbindgen": "1.9.7"
+        },
+        "runtime": {
+          "Tokenizers.DotNet.dll": {}
+        }
+      },
+      "csbindgen/1.9.7": {},
+      "Microsoft.NETCore.Platforms/1.1.0": {},
+      "NETStandard.Library/2.0.3": {
+        "dependencies": {
+          "Microsoft.NETCore.Platforms": "1.1.0"
+        }
+      },
+      "RelaxVersioner/3.22.0": {},
+      "System.Runtime.CompilerServices.Unsafe/6.1.2": {
+        "runtime": {
+          "lib/netstandard2.0/System.Runtime.CompilerServices.Unsafe.dll": {
+            "assemblyVersion": "6.0.0.0",
+            "fileVersion": "6.100.225.20307"
+          }
+        }
+      }
+    }
+  },
+  "libraries": {
+    "Tokenizers.DotNet/1.4.2": {
+      "type": "project",
+      "serviceable": false,
+      "sha512": ""
+    },
+    "csbindgen/1.9.7": {
+      "type": "package",
+      "serviceable": true,
+      "sha512": "sha512-jrAkictaMIcvEgvYvYyngvMlkM4/FAr98h1Tvuqdu1souQZOKu/bu8Apox/VL+JnheA5SvEm+MOi0trGCJcsuw==",
+      "path": "csbindgen/1.9.7",
+      "hashPath": "csbindgen.1.9.7.nupkg.sha512"
+    },
+    "Microsoft.NETCore.Platforms/1.1.0": {
+      "type": "package",
+      "serviceable": true,
+      "sha512": "sha512-kz0PEW2lhqygehI/d6XsPCQzD7ff7gUJaVGPVETX611eadGsA3A877GdSlU0LRVMCTH/+P3o2iDTak+S08V2+A==",
+      "path": "microsoft.netcore.platforms/1.1.0",
+      "hashPath": "microsoft.netcore.platforms.1.1.0.nupkg.sha512"
+    },
+    "NETStandard.Library/2.0.3": {
+      "type": "package",
+      "serviceable": true,
+      "sha512": "sha512-st47PosZSHrjECdjeIzZQbzivYBJFv6P2nv4cj2ypdI204DO+vZ7l5raGMiX4eXMJ53RfOIg+/s4DHVZ54Nu2A==",
+      "path": "netstandard.library/2.0.3",
+      "hashPath": "netstandard.library.2.0.3.nupkg.sha512"
+    },
+    "RelaxVersioner/3.22.0": {
+      "type": "package",
+      "serviceable": true,
+      "sha512": "sha512-+RG7nf54MINMh4muSbidQJ3iHvHWaoOulRibWh6QVZlLxUqSX25nRK0bP8KCPDqFOAoLT7LaSqB7vJg4061nNA==",
+      "path": "relaxversioner/3.22.0",
+      "hashPath": "relaxversioner.3.22.0.nupkg.sha512"
+    },
+    "System.Runtime.CompilerServices.Unsafe/6.1.2": {
+      "type": "package",
+      "serviceable": true,
+      "sha512": "sha512-2hBr6zdbIBTDE3EhK7NSVNdX58uTK6iHW/P/Axmm9sl1xoGSLqDvMtpecn226TNwHByFokYwJmt/aQQNlO5CRw==",
+      "path": "system.runtime.compilerservices.unsafe/6.1.2",
+      "hashPath": "system.runtime.compilerservices.unsafe.6.1.2.nupkg.sha512"
+    }
+  }
+}

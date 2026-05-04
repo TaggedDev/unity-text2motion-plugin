@@ -160,17 +160,20 @@ namespace TextToMotion.Editor
             root.Add(_statusLabel);
 
             // ── Preview ──────────────────────────────────────────────────────
+            // ── Preview ──────────────────────────────────────────────────────────
             root.Add(MakeLabel("Preview"));
             _previewContainer = new IMGUIContainer();
             _previewContainer.style.height          = 200;
             _previewContainer.style.backgroundColor = new StyleColor(new Color(0.13f, 0.13f, 0.13f));
             _previewContainer.style.marginTop       = 4;
-            _previewContainer.onGUIHandler = () =>
-            {
-                if (_preview.Draw(_previewContainer.contentRect))
-                    Repaint();
-            };
+            _previewContainer.onGUIHandler = OnPreviewGUI;
             root.Add(_previewContainer);
+
+            // Запускаем animation loop через UIElements scheduler
+            // ~33ms = ~30fps для preview
+            _previewContainer.schedule
+                .Execute(() => _previewContainer.MarkDirtyRepaint())
+                .Every(33);
 
             // ── Callbacks ────────────────────────────────────────────────────
             _modelDrop.RegisterValueChangedCallback(e => SelectModelByName(e.newValue));
@@ -182,6 +185,11 @@ namespace TextToMotion.Editor
             _modelsFolderField.value = EditorPrefs.GetString(K_MODELS_FOLDER, DEFAULT_MODELS_FOLDER);
             RefreshModelList();
             RefreshButtons();
+        }
+        
+        private void OnPreviewGUI()
+        {
+            _preview?.Draw(_previewContainer.contentRect);
         }
 
         // ── UI helpers ───────────────────────────────────────────────────────
@@ -402,7 +410,6 @@ namespace TextToMotion.Editor
                 var clip = HumanML3DToClip.Build(raw, _runner.MaxFrames, _runner.Fps, assetPath);
 
                 _preview.SetData(raw, _runner.MaxFrames, _runner.Fps);
-                Repaint();
 
                 SetProgress(1f);
                 SetStatus($"✓ Saved: {assetPath}");
